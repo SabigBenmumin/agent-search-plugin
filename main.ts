@@ -1,17 +1,23 @@
-import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, Notice, MarkdownView, Editor } from 'obsidian';
+import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, Notice, MarkdownView, Editor, TFile } from 'obsidian';
 
 interface ChatPluginSettings {
     openRouterKey: string;
     model: string;
     apiUrl: string;
     chatPattern: string;
+    searchMode: 'fulltext' | 'semantic';
+    maxSearchResults: number;
+    enableSearchAgent: boolean;
 }
 
 const DEFAULT_SETTINGS: ChatPluginSettings = {
     openRouterKey: '',
     model: 'anthropic/claude-3.5-sonnet',
     apiUrl: 'https://openrouter.ai/api/v1/chat/completions',
-    chatPattern: '```ai-chat\n{query}\n```'
+    chatPattern: '```ai-chat\n{query}\n```',
+    searchMode: 'fulltext',
+    maxSearchResults: 10,
+    enableSearchAgent: true
 }
 
 const VIEW_TYPE_CHAT = 'chat-view';
@@ -19,6 +25,13 @@ const VIEW_TYPE_CHAT = 'chat-view';
 interface Message {
     role: 'user' | 'assistant';
     content: string;
+}
+
+interface SearchResult {
+    file: TFile;
+    content: string;
+    score: number;
+    matches: string[];
 }
 
 class ChatView extends ItemView {
@@ -29,7 +42,9 @@ class ChatView extends ItemView {
     textArea: HTMLTextAreaElement;
     sendButton: HTMLButtonElement;
     newChatButton: HTMLButtonElement;
+    searchToggle: HTMLInputElement;
     headerContainer: HTMLElement;
+    statusBar: HTMLElement;
 
     constructor(leaf: WorkspaceLeaf, plugin: ChatPlugin) {
         super(leaf);
@@ -61,12 +76,32 @@ class ChatView extends ItemView {
             cls: 'chat-title'
         });
 
-        this.newChatButton = this.headerContainer.createEl('button', {
+        const buttonContainer = this.headerContainer.createDiv({ cls: 'chat-header-buttons' });
+
+        // Search Agent Toggle
+        if (this.plugin.settings.enableSearchAgent) {
+            const toggleContainer = buttonContainer.createDiv({ cls: 'search-toggle-container' });
+            toggleContainer.createEl('label', { 
+                text: '🔍 Search Notes',
+                cls: 'search-toggle-label'
+            });
+            this.searchToggle = toggleContainer.createEl('input', {
+                type: 'checkbox',
+                cls: 'search-toggle-checkbox'
+            });
+            this.searchToggle.checked = true;
+        }
+
+        this.newChatButton = buttonContainer.createEl('button', {
             text: '🔄 New Chat',
             cls: 'chat-new-button'
         });
 
         this.newChatButton.addEventListener('click', () => this.startNewChat());
+
+        // Status bar
+        this.statusBar = container.createDiv({ cls: 'chat-status-bar' });
+        this.updateStatusBar();
 
         // Chat messages container
         this.chatContainer = container.createDiv({ cls: 'chat-messages' });
@@ -77,7 +112,7 @@ class ChatView extends ItemView {
         this.textArea = this.inputContainer.createEl('textarea', {
             cls: 'chat-input',
             attr: {
-                placeholder: 'พิมพ์ข้อความของคุณ...',
+                placeholder: 'พิมพ์ข้อความหรือคำถามเกี่ยวกับ notes ของคุณ...',
                 rows: '3'
             }
         });
@@ -97,6 +132,21 @@ class ChatView extends ItemView {
         });
 
         this.addStyles();
+    }
+
+    updateStatusBar() {
+        if (!this.statusBar) return;
+        
+        const isSearchEnabled = this.searchToggle?.checked ?? false;
+        const mode = this.plugin.settings.searchMode;
+        
+        if (isSearchEnabled) {
+            this.statusBar.setText(`📚 Search Agent Active (${mode === 'fulltext' ? 'Full-text' : 'Semantic'})`);
+            this.statusBar.addClass('status-active');
+        } else {
+            this.statusBar.setText('💬 Chat Mode');
+            this.statusBar.removeClass('status-active');
+        }
     }
 
     startNewChat() {
@@ -126,6 +176,26 @@ class ChatView extends ItemView {
                 margin: 0;
                 font-size: 1.2em;
             }
+            .chat-header-buttons {
+                display: flex;
+                gap: 10px;
+                align-items: center;
+            }
+            .search-toggle-container {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                padding: 4px 8px;
+                background-color: var(--background-secondary);
+                border-radius: 4px;
+            }
+            .search-toggle-label {
+                font-size: 0.85em;
+                margin: 0;
+            }
+            .search-toggle-checkbox {
+                cursor: pointer;
+            }
             .chat-new-button {
                 padding: 6px 12px;
                 background-color: var(--interactive-normal);
@@ -137,6 +207,18 @@ class ChatView extends ItemView {
             }
             .chat-new-button:hover {
                 background-color: var(--interactive-hover);
+            }
+            .chat-status-bar {
+                padding: 6px 10px;
+                margin-bottom: 10px;
+                border-radius: 4px;
+                background-color: var(--background-secondary);
+                font-size: 0.85em;
+                text-align: center;
+            }
+            .chat-status-bar.status-active {
+                background-color: var(--interactive-accent);
+                color: white;
             }
             .chat-messages {
                 flex: 1;
@@ -160,6 +242,24 @@ class ChatView extends ItemView {
             .chat-message-assistant {
                 align-self: flex-start;
                 background-color: var(--background-secondary);
+            }
+            .search-results-info {
+                font-size: 0.85em;
+                padding: 8px;
+                margin-top: 8px;
+                background-color: var(--background-primary);
+                border-radius: 4px;
+                border-left: 3px solid var(--interactive-accent);
+            }
+            .search-result-item {
+                margin: 4px 0;
+                padding: 4px;
+                font-size: 0.9em;
+            }
+            .search-result-link {
+                color: var(--text-accent);
+                text-decoration: none;
+                font-weight: 500;
             }
             .chat-input-container {
                 display: flex;
@@ -223,9 +323,21 @@ class ChatView extends ItemView {
         this.sendButton.disabled = true;
 
         try {
-            const response = await this.callOpenRouter(message);
+            const isSearchEnabled = this.searchToggle?.checked ?? false;
+            let response: string;
+            let searchResults: SearchResult[] | null = null;
+
+            if (isSearchEnabled && this.plugin.settings.enableSearchAgent) {
+                // Search mode: search vault first, then ask AI
+                searchResults = await this.plugin.searchVault(message);
+                response = await this.callOpenRouterWithContext(message, searchResults);
+            } else {
+                // Normal chat mode
+                response = await this.callOpenRouter(message);
+            }
+
             this.messages.push({ role: 'assistant', content: response });
-            this.addMessageToView('assistant', response);
+            this.addMessageToView('assistant', response, searchResults);
         } catch (error) {
             new Notice('เกิดข้อผิดพลาด: ' + error.message);
             console.error('API Error:', error);
@@ -234,7 +346,7 @@ class ChatView extends ItemView {
         }
     }
 
-    addMessageToView(role: 'user' | 'assistant', content: string) {
+    addMessageToView(role: 'user' | 'assistant', content: string, searchResults?: SearchResult[] | null) {
         const messageDiv = this.chatContainer.createDiv({
             cls: `chat-message chat-message-${role}`
         });
@@ -248,6 +360,30 @@ class ChatView extends ItemView {
             .replace(/\n/g, '<br>');
         
         messageDiv.innerHTML = formattedContent;
+
+        // Add search results info
+        if (searchResults && searchResults.length > 0) {
+            const resultsInfo = messageDiv.createDiv({ cls: 'search-results-info' });
+            resultsInfo.createEl('div', { 
+                text: `📚 ค้นพบ ${searchResults.length} notes ที่เกี่ยวข้อง:`,
+                cls: 'search-results-header'
+            });
+            
+            searchResults.slice(0, 5).forEach(result => {
+                const item = resultsInfo.createDiv({ cls: 'search-result-item' });
+                const link = item.createEl('a', {
+                    text: `• ${result.file.basename}`,
+                    cls: 'search-result-link',
+                    href: '#'
+                });
+                
+                link.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    this.plugin.app.workspace.openLinkText(result.file.path, '', false);
+                });
+            });
+        }
+
         this.chatContainer.scrollTop = this.chatContainer.scrollHeight;
     }
 
@@ -263,6 +399,51 @@ class ChatView extends ItemView {
             body: JSON.stringify({
                 model: this.plugin.settings.model,
                 messages: this.messages.concat([{ role: 'user', content: userMessage }])
+            })
+        });
+
+        if (!response.ok) {
+            const error = await response.text();
+            throw new Error(`API Error: ${response.status} - ${error}`);
+        }
+
+        const data = await response.json();
+        return data.choices[0].message.content;
+    }
+
+    async callOpenRouterWithContext(userMessage: string, searchResults: SearchResult[]): Promise<string> {
+        // Build context from search results
+        let context = '';
+        if (searchResults.length > 0) {
+            context = '--- Context from your notes ---\n\n';
+            searchResults.forEach((result, idx) => {
+                context += `[Note ${idx + 1}: ${result.file.basename}]\n`;
+                context += result.content.substring(0, 1000) + '...\n\n';
+            });
+            context += '--- End of context ---\n\n';
+        }
+
+        const systemPrompt = {
+            role: 'system',
+            content: 'You are a helpful assistant that answers questions based on the user\'s Obsidian notes. Use the provided context from their notes to give accurate, relevant answers. If the context doesn\'t contain enough information, say so and provide general knowledge if helpful. Always cite which notes you\'re referencing when possible.'
+        };
+
+        const userPromptWithContext = {
+            role: 'user',
+            content: context + 'Question: ' + userMessage
+        };
+
+        const response = await fetch(this.plugin.settings.apiUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${this.plugin.settings.openRouterKey}`,
+                'HTTP-Referer': 'https://obsidian.md',
+                'X-Title': 'Obsidian Chat Plugin'
+            },
+            body: JSON.stringify({
+                model: this.plugin.settings.model,
+                messages: [systemPrompt, ...this.messages.slice(0, -1), userPromptWithContext]
             })
         });
 
@@ -315,6 +496,19 @@ export default class ChatPlugin extends Plugin {
             }
         });
 
+        // Add command to search notes with AI
+        this.addCommand({
+            id: 'search-notes-ai',
+            name: 'Search Notes with AI',
+            callback: async () => {
+                const query = await this.promptForSearch();
+                if (query) {
+                    await this.activateView();
+                    // TODO: Auto-fill the query
+                }
+            }
+        });
+
         // Register code block processor for ai-chat pattern
         this.registerMarkdownCodeBlockProcessor('ai-chat', async (source, el, ctx) => {
             await this.renderAIChatBlock(source, el, ctx);
@@ -322,6 +516,79 @@ export default class ChatPlugin extends Plugin {
 
         // Add settings tab
         this.addSettingTab(new ChatSettingTab(this.app, this));
+    }
+
+    async promptForSearch(): Promise<string | null> {
+        return new Promise((resolve) => {
+            const modal = new SearchModal(this.app, (query) => resolve(query));
+            modal.open();
+        });
+    }
+
+    async searchVault(query: string): Promise<SearchResult[]> {
+        const files = this.app.vault.getMarkdownFiles();
+        const results: SearchResult[] = [];
+
+        for (const file of files) {
+            const content = await this.app.vault.cachedRead(file);
+            const score = this.calculateRelevanceScore(query, content, file.basename);
+
+            if (score > 0) {
+                results.push({
+                    file,
+                    content,
+                    score,
+                    matches: this.extractMatches(query, content)
+                });
+            }
+        }
+
+        // Sort by relevance score
+        results.sort((a, b) => b.score - a.score);
+
+        // Return top N results
+        return results.slice(0, this.settings.maxSearchResults);
+    }
+
+    calculateRelevanceScore(query: string, content: string, title: string): number {
+        const queryLower = query.toLowerCase();
+        const contentLower = content.toLowerCase();
+        const titleLower = title.toLowerCase();
+
+        let score = 0;
+
+        // Title match (highest weight)
+        if (titleLower.includes(queryLower)) {
+            score += 10;
+        }
+
+        // Exact phrase match
+        if (contentLower.includes(queryLower)) {
+            score += 5;
+        }
+
+        // Individual word matches
+        const queryWords = queryLower.split(/\s+/).filter(w => w.length > 2);
+        queryWords.forEach(word => {
+            const wordCount = (contentLower.match(new RegExp(word, 'g')) || []).length;
+            score += wordCount * 0.5;
+        });
+
+        return score;
+    }
+
+    extractMatches(query: string, content: string): string[] {
+        const queryLower = query.toLowerCase();
+        const lines = content.split('\n');
+        const matches: string[] = [];
+
+        lines.forEach(line => {
+            if (line.toLowerCase().includes(queryLower)) {
+                matches.push(line.trim());
+            }
+        });
+
+        return matches.slice(0, 3); // Return top 3 matching lines
     }
 
     async processAIQueryInNote(editor: Editor, view: MarkdownView) {
@@ -491,6 +758,24 @@ export default class ChatPlugin extends Plugin {
     }
 }
 
+class SearchModal {
+    app: App;
+    onSubmit: (query: string) => void;
+
+    constructor(app: App, onSubmit: (query: string) => void) {
+        this.app = app;
+        this.onSubmit = onSubmit;
+    }
+
+    open() {
+        // Simple implementation - in real plugin, use Modal class
+        const query = prompt('ค้นหาอะไรใน notes?');
+        if (query) {
+            this.onSubmit(query);
+        }
+    }
+}
+
 class ChatSettingTab extends PluginSettingTab {
     plugin: ChatPlugin;
 
@@ -532,10 +817,60 @@ class ChatSettingTab extends PluginSettingTab {
             cls: 'setting-item-description'
         });
 
-        containerEl.createEl('h3', { text: 'วิธีใช้ AI ใน Note:' });
+        containerEl.createEl('h3', { text: 'Search Agent Settings' });
+
+        new Setting(containerEl)
+            .setName('Enable Search Agent')
+            .setDesc('เปิดใช้งานการค้นหา notes และให้ AI ตอบจากเนื้อหาใน vault')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.enableSearchAgent)
+                .onChange(async (value) => {
+                    this.plugin.settings.enableSearchAgent = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Search Mode')
+            .setDesc('เลือกวิธีการค้นหา')
+            .addDropdown(dropdown => dropdown
+                .addOption('fulltext', 'Full-text Search (ไม่ต้องใช้ Vector DB)')
+                .addOption('semantic', 'Semantic Search (ต้องใช้ Embeddings)')
+                .setValue(this.plugin.settings.searchMode)
+                .onChange(async (value) => {
+                    this.plugin.settings.searchMode = value as 'fulltext' | 'semantic';
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Max Search Results')
+            .setDesc('จำนวน notes สูงสุดที่จะส่งให้ AI วิเคราะห์')
+            .addSlider(slider => slider
+                .setLimits(3, 20, 1)
+                .setValue(this.plugin.settings.maxSearchResults)
+                .setDynamicTooltip()
+                .onChange(async (value) => {
+                    this.plugin.settings.maxSearchResults = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        containerEl.createEl('h3', { text: 'วิธีใช้งาน' });
         
         const instructions = containerEl.createEl('div', { cls: 'setting-item-description' });
         instructions.innerHTML = `
+            <h4>🔍 Search Agent Mode:</h4>
+            <ol>
+                <li>เปิด Chat View และเปิด toggle "🔍 Search Notes"</li>
+                <li>ถามคำถามเกี่ยวกับเนื้อหาใน notes เช่น:
+                    <ul>
+                        <li>"สรุปสิ่งที่ผมเขียนเกี่ยวกับ machine learning"</li>
+                        <li>"มีข้อมูลอะไรเกี่ยวกับ Python ใน notes บ้าง"</li>
+                        <li>"หา notes ที่พูดถึงการทำ API"</li>
+                    </ul>
+                </li>
+                <li>AI จะค้นหา notes ที่เกี่ยวข้องและตอบจากเนื้อหาจริง</li>
+            </ol>
+
+            <h4>💬 วิธีใช้ AI ใน Note:</h4>
             <p><strong>1. สร้างคำถาม:</strong></p>
             <pre>
 \`\`\`ai-chat
@@ -550,6 +885,12 @@ class ChatSettingTab extends PluginSettingTab {
 \`\`\`
             </pre>
             <p>💡 <strong>เคล็ดลับ:</strong> เลือกข้อความแล้วใช้คำสั่ง "Ask AI in Note" เพื่อสร้าง query block ทันที</p>
+            
+            <h4>⚙️ Search Modes:</h4>
+            <ul>
+                <li><strong>Full-text Search:</strong> ค้นหาแบบ keyword ง่ายและรวดเร็ว ไม่ต้องใช้ Vector DB</li>
+                <li><strong>Semantic Search:</strong> ค้นหาแบบเข้าใจความหมาย (ยังไม่พร้อมใช้งาน - อยู่ระหว่างพัฒนา)</li>
+            </ul>
         `;
     }
 }
