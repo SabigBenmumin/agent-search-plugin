@@ -1,134 +1,334 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, Notice } from 'obsidian';
 
-// Remember to rename these classes and interfaces!
-
-interface MyPluginSettings {
-	mySetting: string;
+interface ChatPluginSettings {
+    openRouterKey: string;
+    model: string;
+    apiUrl: string;
 }
 
-const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
+const DEFAULT_SETTINGS: ChatPluginSettings = {
+    openRouterKey: '',
+    model: 'anthropic/claude-3.5-sonnet',
+    apiUrl: 'https://openrouter.ai/api/v1/chat/completions'
 }
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+const VIEW_TYPE_CHAT = 'chat-view';
 
-	async onload() {
-		await this.loadSettings();
-
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (_evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
-
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
-
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, _view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
-
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-			}
-		});
-
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
-	}
-
-	onunload() {
-
-	}
-
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-	}
-
-	async saveSettings() {
-		await this.saveData(this.settings);
-	}
+interface Message {
+    role: 'user' | 'assistant';
+    content: string;
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
+class ChatView extends ItemView {
+    plugin: ChatPlugin;
+    messages: Message[] = [];
+    chatContainer: HTMLElement;
+    inputContainer: HTMLElement;
+    textArea: HTMLTextAreaElement;
+    sendButton: HTMLButtonElement;
 
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
+    constructor(leaf: WorkspaceLeaf, plugin: ChatPlugin) {
+        super(leaf);
+        this.plugin = plugin;
+    }
 
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
+    getViewType(): string {
+        return VIEW_TYPE_CHAT;
+    }
+
+    getDisplayText(): string {
+        return 'AI Chat';
+    }
+
+    getIcon(): string {
+        return 'message-circle';
+    }
+
+    async onOpen() {
+        const container = this.containerEl.children[1];
+        container.empty();
+        container.addClass('chat-view-container');
+
+        // Chat messages container
+        this.chatContainer = container.createDiv({ cls: 'chat-messages' });
+
+        // Input container
+        this.inputContainer = container.createDiv({ cls: 'chat-input-container' });
+        
+        this.textArea = this.inputContainer.createEl('textarea', {
+            cls: 'chat-input',
+            attr: {
+                placeholder: 'พิมพ์ข้อความของคุณ...',
+                rows: '3'
+            }
+        });
+
+        this.sendButton = this.inputContainer.createEl('button', {
+            text: 'ส่ง',
+            cls: 'chat-send-button'
+        });
+
+        this.sendButton.addEventListener('click', () => this.sendMessage());
+        
+        this.textArea.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                this.sendMessage();
+            }
+        });
+
+        this.addStyles();
+    }
+
+    addStyles() {
+        const style = document.createElement('style');
+        style.textContent = `
+            .chat-view-container {
+                display: flex;
+                flex-direction: column;
+                height: 100%;
+                padding: 10px;
+            }
+            .chat-messages {
+                flex: 1;
+                overflow-y: auto;
+                margin-bottom: 10px;
+                display: flex;
+                flex-direction: column;
+                gap: 10px;
+            }
+            .chat-message {
+                padding: 10px;
+                border-radius: 8px;
+                max-width: 80%;
+                word-wrap: break-word;
+            }
+            .chat-message-user {
+                align-self: flex-end;
+                background-color: var(--interactive-accent);
+                color: white;
+            }
+            .chat-message-assistant {
+                align-self: flex-start;
+                background-color: var(--background-secondary);
+            }
+            .chat-input-container {
+                display: flex;
+                gap: 10px;
+                align-items: flex-end;
+            }
+            .chat-input {
+                flex: 1;
+                padding: 8px;
+                border: 1px solid var(--background-modifier-border);
+                border-radius: 4px;
+                resize: vertical;
+                min-height: 60px;
+                background-color: var(--background-primary);
+                color: var(--text-normal);
+            }
+            .chat-send-button {
+                padding: 8px 16px;
+                background-color: var(--interactive-accent);
+                color: white;
+                border: none;
+                border-radius: 4px;
+                cursor: pointer;
+                height: 40px;
+            }
+            .chat-send-button:hover {
+                background-color: var(--interactive-accent-hover);
+            }
+            .chat-send-button:disabled {
+                opacity: 0.5;
+                cursor: not-allowed;
+            }
+            .chat-message pre {
+                background-color: var(--background-primary);
+                padding: 10px;
+                border-radius: 4px;
+                overflow-x: auto;
+            }
+            .chat-message code {
+                background-color: var(--background-primary);
+                padding: 2px 4px;
+                border-radius: 2px;
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
+    async sendMessage() {
+        const message = this.textArea.value.trim();
+        if (!message) return;
+
+        if (!this.plugin.settings.openRouterKey) {
+            new Notice('กรุณาตั้งค่า OpenRouter API Key ในการตั้งค่า');
+            return;
+        }
+
+        // Add user message
+        this.messages.push({ role: 'user', content: message });
+        this.addMessageToView('user', message);
+        this.textArea.value = '';
+        this.sendButton.disabled = true;
+
+        try {
+            const response = await this.callOpenRouter(message);
+            this.messages.push({ role: 'assistant', content: response });
+            this.addMessageToView('assistant', response);
+        } catch (error) {
+            new Notice('เกิดข้อผิดพลาด: ' + error.message);
+            console.error('API Error:', error);
+        } finally {
+            this.sendButton.disabled = false;
+        }
+    }
+
+    addMessageToView(role: 'user' | 'assistant', content: string) {
+        const messageDiv = this.chatContainer.createDiv({
+            cls: `chat-message chat-message-${role}`
+        });
+        
+        // Simple markdown rendering
+        const formattedContent = content
+            .replace(/```(\w+)?\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>')
+            .replace(/`([^`]+)`/g, '<code>$1</code>')
+            .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+            .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+            .replace(/\n/g, '<br>');
+        
+        messageDiv.innerHTML = formattedContent;
+        this.chatContainer.scrollTop = this.chatContainer.scrollHeight;
+    }
+
+    async callOpenRouter(userMessage: string): Promise<string> {
+        const response = await fetch(this.plugin.settings.apiUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${this.plugin.settings.openRouterKey}`,
+                'HTTP-Referer': 'https://obsidian.md',
+                'X-Title': 'Obsidian Chat Plugin'
+            },
+            body: JSON.stringify({
+                model: this.plugin.settings.model,
+                messages: this.messages.concat([{ role: 'user', content: userMessage }])
+            })
+        });
+
+        if (!response.ok) {
+            const error = await response.text();
+            throw new Error(`API Error: ${response.status} - ${error}`);
+        }
+
+        const data = await response.json();
+        return data.choices[0].message.content;
+    }
+
+    async onClose() {
+        // Cleanup
+    }
 }
 
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
+export default class ChatPlugin extends Plugin {
+    settings: ChatPluginSettings;
 
-	constructor(app: App, plugin: MyPlugin) {
-		super(app, plugin);
-		this.plugin = plugin;
-	}
+    async onload() {
+        await this.loadSettings();
 
-	display(): void {
-		const {containerEl} = this;
+        // Register the view
+        this.registerView(
+            VIEW_TYPE_CHAT,
+            (leaf) => new ChatView(leaf, this)
+        );
 
-		containerEl.empty();
+        // Add ribbon icon
+        this.addRibbonIcon('message-circle', 'Open AI Chat', () => {
+            this.activateView();
+        });
 
-		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
-			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
-				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
-					await this.plugin.saveSettings();
-				}));
-	}
+        // Add command
+        this.addCommand({
+            id: 'open-chat-view',
+            name: 'Open Chat View',
+            callback: () => {
+                this.activateView();
+            }
+        });
+
+        // Add settings tab
+        this.addSettingTab(new ChatSettingTab(this.app, this));
+    }
+
+    async activateView() {
+        const { workspace } = this.app;
+
+        let leaf: WorkspaceLeaf | null = null;
+        const leaves = workspace.getLeavesOfType(VIEW_TYPE_CHAT);
+
+        if (leaves.length > 0) {
+            // View already exists, reveal it
+            leaf = leaves[0];
+        } else {
+            // Create new view
+            leaf = workspace.getRightLeaf(false);
+            await leaf?.setViewState({ type: VIEW_TYPE_CHAT, active: true });
+        }
+
+        if (leaf) {
+            workspace.revealLeaf(leaf);
+        }
+    }
+
+    async loadSettings() {
+        this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    }
+
+    async saveSettings() {
+        await this.saveData(this.settings);
+    }
+}
+
+class ChatSettingTab extends PluginSettingTab {
+    plugin: ChatPlugin;
+
+    constructor(app: App, plugin: ChatPlugin) {
+        super(app, plugin);
+        this.plugin = plugin;
+    }
+
+    display(): void {
+        const { containerEl } = this;
+        containerEl.empty();
+
+        containerEl.createEl('h2', { text: 'Chat Plugin Settings' });
+
+        new Setting(containerEl)
+            .setName('OpenRouter API Key')
+            .setDesc('ใส่ OpenRouter API Key ของคุณ')
+            .addText(text => text
+                .setPlaceholder('sk-or-...')
+                .setValue(this.plugin.settings.openRouterKey)
+                .onChange(async (value) => {
+                    this.plugin.settings.openRouterKey = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Model')
+            .setDesc('เลือก AI model ที่ต้องการใช้')
+            .addText(text => text
+                .setPlaceholder('anthropic/claude-3.5-sonnet')
+                .setValue(this.plugin.settings.model)
+                .onChange(async (value) => {
+                    this.plugin.settings.model = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        containerEl.createEl('p', {
+            text: 'รุ่นที่แนะนำ: anthropic/claude-3.5-sonnet, openai/gpt-4, google/gemini-pro',
+            cls: 'setting-item-description'
+        });
+    }
 }
