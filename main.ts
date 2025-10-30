@@ -1,15 +1,17 @@
-import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, Notice } from 'obsidian';
+import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, Notice, MarkdownView, Editor } from 'obsidian';
 
 interface ChatPluginSettings {
     openRouterKey: string;
     model: string;
     apiUrl: string;
+    chatPattern: string;
 }
 
 const DEFAULT_SETTINGS: ChatPluginSettings = {
     openRouterKey: '',
     model: 'anthropic/claude-3.5-sonnet',
-    apiUrl: 'https://openrouter.ai/api/v1/chat/completions'
+    apiUrl: 'https://openrouter.ai/api/v1/chat/completions',
+    chatPattern: '```ai-chat\n{query}\n```'
 }
 
 const VIEW_TYPE_CHAT = 'chat-view';
@@ -26,6 +28,8 @@ class ChatView extends ItemView {
     inputContainer: HTMLElement;
     textArea: HTMLTextAreaElement;
     sendButton: HTMLButtonElement;
+    newChatButton: HTMLButtonElement;
+    headerContainer: HTMLElement;
 
     constructor(leaf: WorkspaceLeaf, plugin: ChatPlugin) {
         super(leaf);
@@ -48,6 +52,21 @@ class ChatView extends ItemView {
         const container = this.containerEl.children[1];
         container.empty();
         container.addClass('chat-view-container');
+
+        // Header with New Chat button
+        this.headerContainer = container.createDiv({ cls: 'chat-header' });
+        
+        const title = this.headerContainer.createEl('h3', {
+            text: 'AI Chat',
+            cls: 'chat-title'
+        });
+
+        this.newChatButton = this.headerContainer.createEl('button', {
+            text: '🔄 New Chat',
+            cls: 'chat-new-button'
+        });
+
+        this.newChatButton.addEventListener('click', () => this.startNewChat());
 
         // Chat messages container
         this.chatContainer = container.createDiv({ cls: 'chat-messages' });
@@ -80,6 +99,12 @@ class ChatView extends ItemView {
         this.addStyles();
     }
 
+    startNewChat() {
+        this.messages = [];
+        this.chatContainer.empty();
+        new Notice('เริ่มการสนทนาใหม่');
+    }
+
     addStyles() {
         const style = document.createElement('style');
         style.textContent = `
@@ -88,6 +113,30 @@ class ChatView extends ItemView {
                 flex-direction: column;
                 height: 100%;
                 padding: 10px;
+            }
+            .chat-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 10px;
+                padding-bottom: 10px;
+                border-bottom: 1px solid var(--background-modifier-border);
+            }
+            .chat-title {
+                margin: 0;
+                font-size: 1.2em;
+            }
+            .chat-new-button {
+                padding: 6px 12px;
+                background-color: var(--interactive-normal);
+                color: var(--text-normal);
+                border: 1px solid var(--background-modifier-border);
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 0.9em;
+            }
+            .chat-new-button:hover {
+                background-color: var(--interactive-hover);
             }
             .chat-messages {
                 flex: 1;
@@ -248,7 +297,7 @@ export default class ChatPlugin extends Plugin {
             this.activateView();
         });
 
-        // Add command
+        // Add command to open chat view
         this.addCommand({
             id: 'open-chat-view',
             name: 'Open Chat View',
@@ -257,8 +306,162 @@ export default class ChatPlugin extends Plugin {
             }
         });
 
+        // Add command to ask AI in note
+        this.addCommand({
+            id: 'ask-ai-in-note',
+            name: 'Ask AI in Note',
+            editorCallback: async (editor: Editor, view: MarkdownView) => {
+                await this.processAIQueryInNote(editor, view);
+            }
+        });
+
+        // Register code block processor for ai-chat pattern
+        this.registerMarkdownCodeBlockProcessor('ai-chat', async (source, el, ctx) => {
+            await this.renderAIChatBlock(source, el, ctx);
+        });
+
         // Add settings tab
         this.addSettingTab(new ChatSettingTab(this.app, this));
+    }
+
+    async processAIQueryInNote(editor: Editor, view: MarkdownView) {
+        if (!this.settings.openRouterKey) {
+            new Notice('กรุณาตั้งค่า OpenRouter API Key ในการตั้งค่า');
+            return;
+        }
+
+        const cursor = editor.getCursor();
+        const content = editor.getValue();
+        
+        // Find ai-chat code blocks
+        const pattern = /```ai-chat\n([\s\S]*?)\n```/g;
+        let match;
+        let foundBlock = false;
+
+        while ((match = pattern.exec(content)) !== null) {
+            const blockStart = match.index;
+            const blockEnd = blockStart + match[0].length;
+            const query = match[1].trim();
+            
+            // Check if cursor is in this block
+            const cursorPos = editor.posToOffset(cursor);
+            if (cursorPos >= blockStart && cursorPos <= blockEnd) {
+                foundBlock = true;
+                
+                // Check if answer already exists
+                const afterBlock = content.substring(blockEnd);
+                const answerPattern = /\n\n```ai-answer\n([\s\S]*?)\n```/;
+                const answerMatch = afterBlock.match(answerPattern);
+                
+                if (answerMatch && afterBlock.indexOf(answerMatch[0]) === 0) {
+                    // Update existing answer
+                    new Notice('กำลังอัพเดตคำตอบ...');
+                    const answer = await this.callOpenRouter(query);
+                    const newAnswer = `\n\n\`\`\`ai-answer\n${answer}\n\`\`\``;
+                    const replaceEnd = blockEnd + answerMatch[0].length;
+                    
+                    editor.replaceRange(
+                        match[0] + newAnswer,
+                        editor.offsetToPos(blockStart),
+                        editor.offsetToPos(replaceEnd)
+                    );
+                } else {
+                    // Add new answer
+                    new Notice('กำลังถาม AI...');
+                    const answer = await this.callOpenRouter(query);
+                    const answerBlock = `\n\n\`\`\`ai-answer\n${answer}\n\`\`\``;
+                    
+                    editor.replaceRange(
+                        match[0] + answerBlock,
+                        editor.offsetToPos(blockStart),
+                        editor.offsetToPos(blockEnd)
+                    );
+                }
+                
+                break;
+            }
+        }
+
+        if (!foundBlock) {
+            // Create new query block at cursor
+            const selectedText = editor.getSelection();
+            const query = selectedText || 'คำถามของคุณที่นี่';
+            const newBlock = `\`\`\`ai-chat\n${query}\n\`\`\`\n\n`;
+            
+            if (selectedText) {
+                editor.replaceSelection(newBlock);
+                new Notice('สร้าง AI query block แล้ว - ใช้คำสั่ง "Ask AI in Note" อีกครั้งเพื่อรับคำตอบ');
+            } else {
+                editor.replaceRange(newBlock, cursor);
+                new Notice('สร้าง AI query block แล้ว - แก้ไขคำถามแล้วใช้คำสั่งอีกครั้ง');
+            }
+        }
+    }
+
+    async renderAIChatBlock(source: string, el: HTMLElement, ctx: any) {
+        const container = el.createDiv({ cls: 'ai-chat-block' });
+        
+        const queryDiv = container.createDiv({ cls: 'ai-chat-query' });
+        queryDiv.createEl('strong', { text: '❓ คำถาม: ' });
+        queryDiv.createEl('span', { text: source });
+
+        // Add custom styles for the block
+        if (!document.querySelector('#ai-chat-styles')) {
+            const style = document.createElement('style');
+            style.id = 'ai-chat-styles';
+            style.textContent = `
+                .ai-chat-block {
+                    border: 2px solid var(--interactive-accent);
+                    border-radius: 8px;
+                    padding: 12px;
+                    margin: 10px 0;
+                    background-color: var(--background-secondary);
+                }
+                .ai-chat-query {
+                    color: var(--text-normal);
+                    font-size: 0.95em;
+                }
+                .ai-answer-block {
+                    border: 2px solid var(--color-green);
+                    border-radius: 8px;
+                    padding: 12px;
+                    margin: 10px 0;
+                    background-color: var(--background-secondary);
+                }
+                .ai-answer-content {
+                    color: var(--text-normal);
+                    margin-top: 8px;
+                    line-height: 1.6;
+                }
+            `;
+            document.head.appendChild(style);
+        }
+    }
+
+    async callOpenRouter(query: string): Promise<string> {
+        const response = await fetch(this.settings.apiUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${this.settings.openRouterKey}`,
+                'HTTP-Referer': 'https://obsidian.md',
+                'X-Title': 'Obsidian Chat Plugin'
+            },
+            body: JSON.stringify({
+                model: this.settings.model,
+                messages: [
+                    { role: 'user', content: query }
+                ]
+            })
+        });
+
+        if (!response.ok) {
+            const error = await response.text();
+            throw new Error(`API Error: ${response.status} - ${error}`);
+        }
+
+        const data = await response.json();
+        return data.choices[0].message.content;
     }
 
     async activateView() {
@@ -268,10 +471,8 @@ export default class ChatPlugin extends Plugin {
         const leaves = workspace.getLeavesOfType(VIEW_TYPE_CHAT);
 
         if (leaves.length > 0) {
-            // View already exists, reveal it
             leaf = leaves[0];
         } else {
-            // Create new view
             leaf = workspace.getRightLeaf(false);
             await leaf?.setViewState({ type: VIEW_TYPE_CHAT, active: true });
         }
@@ -330,5 +531,25 @@ class ChatSettingTab extends PluginSettingTab {
             text: 'รุ่นที่แนะนำ: anthropic/claude-3.5-sonnet, openai/gpt-4, google/gemini-pro',
             cls: 'setting-item-description'
         });
+
+        containerEl.createEl('h3', { text: 'วิธีใช้ AI ใน Note:' });
+        
+        const instructions = containerEl.createEl('div', { cls: 'setting-item-description' });
+        instructions.innerHTML = `
+            <p><strong>1. สร้างคำถาม:</strong></p>
+            <pre>
+\`\`\`ai-chat
+คำถามของคุณที่นี่
+\`\`\`
+            </pre>
+            <p><strong>2. วางเคอร์เซอร์ใน code block</strong> แล้วใช้คำสั่ง "Ask AI in Note" (Ctrl/Cmd + P)</p>
+            <p><strong>3. คำตอบจะปรากฏใต้คำถาม:</strong></p>
+            <pre>
+\`\`\`ai-answer
+คำตอบจาก AI
+\`\`\`
+            </pre>
+            <p>💡 <strong>เคล็ดลับ:</strong> เลือกข้อความแล้วใช้คำสั่ง "Ask AI in Note" เพื่อสร้าง query block ทันที</p>
+        `;
     }
 }
