@@ -3,7 +3,7 @@
 	"name": "vault searcher",
 	"version": "1.0.0",
 	"minAppVersion": "0.15.0",
-	"description": "use AI Agent for search some your note and manage your vault, ให้ ai ช่วยค้นหาและสรุปข้อมูลใน vault ของคุณ, support thai language",
+	"description": "use AI Agent for search some your note and manage your vault, ให้ ai ช่วยค้นหาและสรุปข้อมูลใน vault ของคุณ, support thai languageAI-powered chat with vault search and file management. Features function calling for creating/editing notes, smart search integration, and in-note AI queries via OpenRouter API.",
 	"author": "Sabig",
 	"authorUrl": "https://github.com/SabigBenmumin",
 	"fundingUrl": "https://github.com/SabigBenmumin/agent-search-plugin",
