@@ -8,6 +8,7 @@ interface ChatPluginSettings {
     searchMode: 'fulltext' | 'semantic';
     maxSearchResults: number;
     enableSearchAgent: boolean;
+    enableFunctionCalling: boolean;
 }
 
 const DEFAULT_SETTINGS: ChatPluginSettings = {
@@ -17,14 +18,17 @@ const DEFAULT_SETTINGS: ChatPluginSettings = {
     chatPattern: '```ai-chat\n{query}\n```',
     searchMode: 'fulltext',
     maxSearchResults: 10,
-    enableSearchAgent: true
+    enableSearchAgent: true,
+    enableFunctionCalling: true
 }
 
 const VIEW_TYPE_CHAT = 'chat-view';
 
 interface Message {
-    role: 'user' | 'assistant';
-    content: string;
+    role: 'user' | 'assistant' | 'system' | 'tool';
+    content: string | any;
+    tool_call_id?: string;
+    tool_calls?: any[];
 }
 
 interface SearchResult {
@@ -34,6 +38,112 @@ interface SearchResult {
     matches: string[];
 }
 
+// Define available tools for function calling
+const AVAILABLE_TOOLS = [
+    {
+        type: "function",
+        function: {
+            name: "read_note",
+            description: "อ่านเนื้อหาของ note ในวอลท์ Obsidian โดยระบุชื่อไฟล์หรือพาธ",
+            parameters: {
+                type: "object",
+                properties: {
+                    file_path: {
+                        type: "string",
+                        description: "พาธหรือชื่อไฟล์ของ note ที่ต้องการอ่าน เช่น 'Project Notes/Ideas.md' หรือ 'Daily Note.md'"
+                    }
+                },
+                required: ["file_path"]
+            }
+        }
+    },
+    {
+        type: "function",
+        function: {
+            name: "list_files",
+            description: "แสดงรายการไฟล์ทั้งหมดในโฟลเดอร์ หรือแสดงโครงสร้างวอลท์",
+            parameters: {
+                type: "object",
+                properties: {
+                    folder_path: {
+                        type: "string",
+                        description: "พาธของโฟลเดอร์ที่ต้องการดูรายการไฟล์ ถ้าไม่ระบุจะแสดงทุกไฟล์ในวอลท์"
+                    },
+                    include_folders: {
+                        type: "boolean",
+                        description: "แสดงโฟลเดอร์ด้วยหรือไม่ (default: true)"
+                    }
+                },
+                required: []
+            }
+        }
+    },
+    {
+        type: "function",
+        function: {
+            name: "edit_file",
+            description: "แก้ไขเนื้อหาของไฟล์ที่มีอยู่ สามารถแทนที่ทั้งหมดหรือเพิ่มเติมได้",
+            parameters: {
+                type: "object",
+                properties: {
+                    file_path: {
+                        type: "string",
+                        description: "พาธของไฟล์ที่ต้องการแก้ไข"
+                    },
+                    content: {
+                        type: "string",
+                        description: "เนื้อหาใหม่ที่ต้องการเขียน"
+                    },
+                    mode: {
+                        type: "string",
+                        enum: ["replace", "append", "prepend"],
+                        description: "วิธีการแก้ไข: replace=แทนที่ทั้งหมด, append=เพิ่มท้ายไฟล์, prepend=เพิ่มต้นไฟล์"
+                    }
+                },
+                required: ["file_path", "content", "mode"]
+            }
+        }
+    },
+    {
+        type: "function",
+        function: {
+            name: "create_file",
+            description: "สร้างไฟล์ใหม่พร้อมเนื้อหา",
+            parameters: {
+                type: "object",
+                properties: {
+                    file_path: {
+                        type: "string",
+                        description: "พาธและชื่อไฟล์ที่ต้องการสร้าง ต้องลงท้ายด้วย .md"
+                    },
+                    content: {
+                        type: "string",
+                        description: "เนื้อหาของไฟล์"
+                    }
+                },
+                required: ["file_path", "content"]
+            }
+        }
+    },
+    {
+        type: "function",
+        function: {
+            name: "create_folder",
+            description: "สร้างโฟลเดอร์ใหม่ในวอลท์",
+            parameters: {
+                type: "object",
+                properties: {
+                    folder_path: {
+                        type: "string",
+                        description: "พาธของโฟลเดอร์ที่ต้องการสร้าง"
+                    }
+                },
+                required: ["folder_path"]
+            }
+        }
+    }
+];
+
 class ChatView extends ItemView {
     plugin: ChatPlugin;
     messages: Message[] = [];
@@ -42,7 +152,8 @@ class ChatView extends ItemView {
     textArea: HTMLTextAreaElement;
     sendButton: HTMLButtonElement;
     newChatButton: HTMLButtonElement;
-    searchToggle: HTMLInputElement;
+    searchToggle: HTMLInputElement | null = null;
+    agentToggle: HTMLInputElement | null = null;
     headerContainer: HTMLElement;
     statusBar: HTMLElement;
 
@@ -68,10 +179,10 @@ class ChatView extends ItemView {
         container.empty();
         container.addClass('chat-view-container');
 
-        // Header with New Chat button
+        // Header with controls
         this.headerContainer = container.createDiv({ cls: 'chat-header' });
         
-        const title = this.headerContainer.createEl('h3', {
+        this.headerContainer.createEl('h3', {
             text: 'AI Chat',
             cls: 'chat-title'
         });
@@ -80,16 +191,34 @@ class ChatView extends ItemView {
 
         // Search Agent Toggle
         if (this.plugin.settings.enableSearchAgent) {
-            const toggleContainer = buttonContainer.createDiv({ cls: 'search-toggle-container' });
+            const toggleContainer = buttonContainer.createDiv({ cls: 'toggle-container' });
             toggleContainer.createEl('label', { 
-                text: '🔍 Search Notes',
-                cls: 'search-toggle-label'
+                text: '🔍 Search',
+                cls: 'toggle-label'
             });
             this.searchToggle = toggleContainer.createEl('input', {
                 type: 'checkbox',
-                cls: 'search-toggle-checkbox'
+                cls: 'toggle-checkbox'
             });
             this.searchToggle.checked = true;
+            this.searchToggle.addEventListener('change', () => this.updateStatusBar());
+        }
+
+        // Function Calling Toggle
+        if (this.plugin.settings.enableFunctionCalling) {
+            const agentContainer = buttonContainer.createDiv({ cls: 'toggle-container' });
+            agentContainer.createEl('label', { 
+                text: '🤖 Agent',
+                cls: 'toggle-label'
+            });
+            this.agentToggle = agentContainer.createEl('input', {
+                type: 'checkbox',
+                cls: 'toggle-checkbox'
+            });
+            this.agentToggle.checked = true;
+            this.agentToggle.addEventListener('change', () => this.updateStatusBar());
+            
+            agentContainer.setAttribute('title', 'เปิดใช้ AI Agent ที่สามารถสร้าง/แก้ไขไฟล์ได้');
         }
 
         this.newChatButton = buttonContainer.createEl('button', {
@@ -138,15 +267,22 @@ class ChatView extends ItemView {
         if (!this.statusBar) return;
         
         const isSearchEnabled = this.searchToggle?.checked ?? false;
-        const mode = this.plugin.settings.searchMode;
+        const isAgentEnabled = this.agentToggle?.checked ?? false;
         
-        if (isSearchEnabled) {
-            this.statusBar.setText(`📚 Search Agent Active (${mode === 'fulltext' ? 'Full-text' : 'Semantic'})`);
+        let status = '💬 Chat Mode';
+        const features = [];
+        
+        if (isSearchEnabled) features.push('Search');
+        if (isAgentEnabled) features.push('Agent Tools');
+        
+        if (features.length > 0) {
+            status = `✨ ${features.join(' + ')} Active`;
             this.statusBar.addClass('status-active');
         } else {
-            this.statusBar.setText('💬 Chat Mode');
             this.statusBar.removeClass('status-active');
         }
+        
+        this.statusBar.setText(status);
     }
 
     startNewChat() {
@@ -156,7 +292,11 @@ class ChatView extends ItemView {
     }
 
     addStyles() {
+        const existingStyle = document.getElementById('chat-plugin-styles');
+        if (existingStyle) return;
+
         const style = document.createElement('style');
+        style.id = 'chat-plugin-styles';
         style.textContent = `
             .chat-view-container {
                 display: flex;
@@ -181,7 +321,7 @@ class ChatView extends ItemView {
                 gap: 10px;
                 align-items: center;
             }
-            .search-toggle-container {
+            .toggle-container {
                 display: flex;
                 align-items: center;
                 gap: 6px;
@@ -189,11 +329,11 @@ class ChatView extends ItemView {
                 background-color: var(--background-secondary);
                 border-radius: 4px;
             }
-            .search-toggle-label {
+            .toggle-label {
                 font-size: 0.85em;
                 margin: 0;
             }
-            .search-toggle-checkbox {
+            .toggle-checkbox {
                 cursor: pointer;
             }
             .chat-new-button {
@@ -243,6 +383,24 @@ class ChatView extends ItemView {
                 align-self: flex-start;
                 background-color: var(--background-secondary);
             }
+            .chat-message-tool {
+                align-self: flex-start;
+                background-color: var(--background-primary);
+                border-left: 3px solid var(--color-orange);
+                font-size: 0.9em;
+                max-width: 90%;
+            }
+            .tool-call-header {
+                font-weight: 600;
+                color: var(--color-orange);
+                margin-bottom: 4px;
+            }
+            .tool-call-result {
+                font-family: monospace;
+                font-size: 0.85em;
+                opacity: 0.8;
+                white-space: pre-wrap;
+            }
             .search-results-info {
                 font-size: 0.85em;
                 padding: 8px;
@@ -260,6 +418,10 @@ class ChatView extends ItemView {
                 color: var(--text-accent);
                 text-decoration: none;
                 font-weight: 500;
+                cursor: pointer;
+            }
+            .search-result-link:hover {
+                text-decoration: underline;
             }
             .chat-input-container {
                 display: flex;
@@ -324,26 +486,211 @@ class ChatView extends ItemView {
 
         try {
             const isSearchEnabled = this.searchToggle?.checked ?? false;
-            let response: string;
+            const isAgentEnabled = this.agentToggle?.checked ?? false;
+
             let searchResults: SearchResult[] | null = null;
 
+            // Search vault if enabled
             if (isSearchEnabled && this.plugin.settings.enableSearchAgent) {
-                // Search mode: search vault first, then ask AI
                 searchResults = await this.plugin.searchVault(message);
-                response = await this.callOpenRouterWithContext(message, searchResults);
-            } else {
-                // Normal chat mode
-                response = await this.callOpenRouter(message);
             }
 
-            this.messages.push({ role: 'assistant', content: response });
-            this.addMessageToView('assistant', response, searchResults);
+            // Call AI with or without function calling
+            if (isAgentEnabled && this.plugin.settings.enableFunctionCalling) {
+                await this.handleAgenticChat(message, searchResults);
+            } else {
+                await this.handleSimpleChat(message, searchResults);
+            }
+
         } catch (error) {
             new Notice('เกิดข้อผิดพลาด: ' + error.message);
             console.error('API Error:', error);
         } finally {
             this.sendButton.disabled = false;
         }
+    }
+
+    async handleSimpleChat(userMessage: string, searchResults: SearchResult[] | null) {
+        let response: string;
+        
+        if (searchResults && searchResults.length > 0) {
+            response = await this.callOpenRouterWithContext(userMessage, searchResults);
+        } else {
+            response = await this.callOpenRouter();
+        }
+
+        this.messages.push({ role: 'assistant', content: response });
+        this.addMessageToView('assistant', response, searchResults);
+    }
+
+    async handleAgenticChat(userMessage: string, searchResults: SearchResult[] | null) {
+        let conversationMessages: Message[] = [];
+        
+        // Build system prompt
+        const systemPrompt = this.buildSystemPrompt(searchResults);
+        conversationMessages.push({ role: 'system', content: systemPrompt });
+        
+        // Add conversation history (excluding system messages)
+        const historyMessages = this.messages.filter(m => m.role !== 'system');
+        conversationMessages.push(...historyMessages);
+
+        let continueLoop = true;
+        let iterationCount = 0;
+        const maxIterations = 10;
+
+        while (continueLoop && iterationCount < maxIterations) {
+            iterationCount++;
+
+            const response = await fetch(this.plugin.settings.apiUrl, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${this.plugin.settings.openRouterKey}`,
+                    'HTTP-Referer': 'https://obsidian.md',
+                    'X-Title': 'Obsidian Chat Plugin'
+                },
+                body: JSON.stringify({
+                    model: this.plugin.settings.model,
+                    messages: conversationMessages,
+                    tools: AVAILABLE_TOOLS,
+                    tool_choice: 'auto'
+                })
+            });
+
+            if (!response.ok) {
+                const error = await response.text();
+                throw new Error(`API Error: ${response.status} - ${error}`);
+            }
+
+            const data = await response.json();
+            const assistantMessage = data.choices[0].message;
+
+            // Add assistant message to conversation
+            conversationMessages.push(assistantMessage);
+
+            // Check if there are tool calls
+            if (assistantMessage.tool_calls && assistantMessage.tool_calls.length > 0) {
+                // Execute each tool call
+                for (const toolCall of assistantMessage.tool_calls) {
+                    const toolResult = await this.executeTool(toolCall);
+                    
+                    // Show tool execution in UI
+                    this.addToolCallToView(toolCall, toolResult);
+
+                    // Add tool result to conversation
+                    conversationMessages.push({
+                        role: 'tool',
+                        content: toolResult.content,
+                        tool_call_id: toolResult.tool_call_id
+                    });
+                }
+            } else {
+                // No more tool calls, show final response
+                continueLoop = false;
+                
+                if (assistantMessage.content) {
+                    this.messages.push({ role: 'assistant', content: assistantMessage.content });
+                    this.addMessageToView('assistant', assistantMessage.content, searchResults);
+                }
+            }
+        }
+
+        if (iterationCount >= maxIterations) {
+            new Notice('⚠️ Agent reached maximum iterations');
+        }
+    }
+
+    buildSystemPrompt(searchResults: SearchResult[] | null): string {
+        let prompt = `You are a helpful AI assistant integrated into Obsidian. You have access to tools to read, create, edit files and folders in the user's vault.
+
+Important guidelines:
+- Always confirm before making destructive changes
+- When creating files, use clear, descriptive names
+- Follow markdown best practices
+- Be helpful and proactive in organizing information`;
+
+        if (searchResults && searchResults.length > 0) {
+            prompt += '\n\n--- Relevant notes from vault ---\n\n';
+            searchResults.forEach((result, idx) => {
+                prompt += `[Note ${idx + 1}: ${result.file.basename}]\n`;
+                prompt += `Path: ${result.file.path}\n`;
+                prompt += result.content.substring(0, 800) + '...\n\n';
+            });
+            prompt += '--- End of search results ---';
+        }
+
+        return prompt;
+    }
+
+    async executeTool(toolCall: any): Promise<any> {
+        const functionName = toolCall.function.name;
+        let args: any = {};
+        
+        try {
+            args = JSON.parse(toolCall.function.arguments);
+        } catch (e) {
+            return {
+                tool_call_id: toolCall.id,
+                content: `Error parsing arguments: ${e.message}`
+            };
+        }
+
+        let result: string;
+
+        try {
+            switch (functionName) {
+                case 'read_note':
+                    result = await this.plugin.toolReadNote(args.file_path);
+                    break;
+                case 'list_files':
+                    result = await this.plugin.toolListFiles(args.folder_path, args.include_folders);
+                    break;
+                case 'edit_file':
+                    result = await this.plugin.toolEditFile(args.file_path, args.content, args.mode);
+                    break;
+                case 'create_file':
+                    result = await this.plugin.toolCreateFile(args.file_path, args.content);
+                    break;
+                case 'create_folder':
+                    result = await this.plugin.toolCreateFolder(args.folder_path);
+                    break;
+                default:
+                    result = `Error: Unknown tool '${functionName}'`;
+            }
+        } catch (error) {
+            result = `Error executing ${functionName}: ${error.message}`;
+        }
+
+        return {
+            tool_call_id: toolCall.id,
+            content: result
+        };
+    }
+
+    addToolCallToView(toolCall: any, result: any) {
+        const messageDiv = this.chatContainer.createDiv({
+            cls: 'chat-message chat-message-tool'
+        });
+
+        const header = messageDiv.createDiv({ cls: 'tool-call-header' });
+        let args: any = {};
+        try {
+            args = JSON.parse(toolCall.function.arguments);
+        } catch (e) {
+            args = {};
+        }
+        
+        let headerText = `🛠️ ${toolCall.function.name}`;
+        if (args.file_path) headerText += ` → ${args.file_path}`;
+        else if (args.folder_path) headerText += ` → ${args.folder_path}`;
+        
+        header.setText(headerText);
+
+        const resultDiv = messageDiv.createDiv({ cls: 'tool-call-result' });
+        const displayContent = result.content.substring(0, 500);
+        resultDiv.setText(displayContent + (result.content.length > 500 ? '...' : ''));
+
+        this.chatContainer.scrollTop = this.chatContainer.scrollHeight;
     }
 
     addMessageToView(role: 'user' | 'assistant', content: string, searchResults?: SearchResult[] | null) {
@@ -362,7 +709,7 @@ class ChatView extends ItemView {
         messageDiv.innerHTML = formattedContent;
 
         // Add search results info
-        if (searchResults && searchResults.length > 0) {
+        if (role === 'assistant' && searchResults && searchResults.length > 0) {
             const resultsInfo = messageDiv.createDiv({ cls: 'search-results-info' });
             resultsInfo.createEl('div', { 
                 text: `📚 ค้นพบ ${searchResults.length} notes ที่เกี่ยวข้อง:`,
@@ -373,8 +720,7 @@ class ChatView extends ItemView {
                 const item = resultsInfo.createDiv({ cls: 'search-result-item' });
                 const link = item.createEl('a', {
                     text: `• ${result.file.basename}`,
-                    cls: 'search-result-link',
-                    href: '#'
+                    cls: 'search-result-link'
                 });
                 
                 link.addEventListener('click', (e) => {
@@ -387,7 +733,7 @@ class ChatView extends ItemView {
         this.chatContainer.scrollTop = this.chatContainer.scrollHeight;
     }
 
-    async callOpenRouter(userMessage: string): Promise<string> {
+    async callOpenRouter(): Promise<string> {
         const response = await fetch(this.plugin.settings.apiUrl, {
             method: 'POST',
             headers: {
@@ -398,7 +744,7 @@ class ChatView extends ItemView {
             },
             body: JSON.stringify({
                 model: this.plugin.settings.model,
-                messages: this.messages.concat([{ role: 'user', content: userMessage }])
+                messages: this.messages
             })
         });
 
@@ -412,7 +758,6 @@ class ChatView extends ItemView {
     }
 
     async callOpenRouterWithContext(userMessage: string, searchResults: SearchResult[]): Promise<string> {
-        // Build context from search results
         let context = '';
         if (searchResults.length > 0) {
             context = '--- Context from your notes ---\n\n';
@@ -423,15 +768,17 @@ class ChatView extends ItemView {
             context += '--- End of context ---\n\n';
         }
 
-        const systemPrompt = {
+        const systemPrompt: Message = {
             role: 'system',
-            content: 'You are a helpful assistant that answers questions based on the user\'s Obsidian notes. Use the provided context from their notes to give accurate, relevant answers. If the context doesn\'t contain enough information, say so and provide general knowledge if helpful. Always cite which notes you\'re referencing when possible.'
+            content: 'You are a helpful assistant that answers questions based on the user\'s Obsidian notes. Use the provided context from their notes to give accurate, relevant answers.'
         };
 
-        const userPromptWithContext = {
+        const userPromptWithContext: Message = {
             role: 'user',
             content: context + 'Question: ' + userMessage
         };
+
+        const messagesToSend = [systemPrompt, ...this.messages.slice(0, -1), userPromptWithContext];
 
         const response = await fetch(this.plugin.settings.apiUrl, {
             method: 'POST',
@@ -443,7 +790,7 @@ class ChatView extends ItemView {
             },
             body: JSON.stringify({
                 model: this.plugin.settings.model,
-                messages: [systemPrompt, ...this.messages.slice(0, -1), userPromptWithContext]
+                messages: messagesToSend
             })
         });
 
@@ -467,18 +814,15 @@ export default class ChatPlugin extends Plugin {
     async onload() {
         await this.loadSettings();
 
-        // Register the view
         this.registerView(
             VIEW_TYPE_CHAT,
             (leaf) => new ChatView(leaf, this)
         );
 
-        // Add ribbon icon
         this.addRibbonIcon('message-circle', 'Open AI Chat', () => {
             this.activateView();
         });
 
-        // Add command to open chat view
         this.addCommand({
             id: 'open-chat-view',
             name: 'Open Chat View',
@@ -487,7 +831,6 @@ export default class ChatPlugin extends Plugin {
             }
         });
 
-        // Add command to ask AI in note
         this.addCommand({
             id: 'ask-ai-in-note',
             name: 'Ask AI in Note',
@@ -496,33 +839,185 @@ export default class ChatPlugin extends Plugin {
             }
         });
 
-        // Add command to search notes with AI
-        this.addCommand({
-            id: 'search-notes-ai',
-            name: 'Search Notes with AI',
-            callback: async () => {
-                const query = await this.promptForSearch();
-                if (query) {
-                    await this.activateView();
-                    // TODO: Auto-fill the query
-                }
-            }
-        });
-
-        // Register code block processor for ai-chat pattern
         this.registerMarkdownCodeBlockProcessor('ai-chat', async (source, el, ctx) => {
-            await this.renderAIChatBlock(source, el, ctx);
+            await this.renderAIChatBlock(source, el);
         });
 
-        // Add settings tab
         this.addSettingTab(new ChatSettingTab(this.app, this));
     }
 
-    async promptForSearch(): Promise<string | null> {
-        return new Promise((resolve) => {
-            const modal = new SearchModal(this.app, (query) => resolve(query));
-            modal.open();
-        });
+    // Tool implementations
+    async toolReadNote(filePath: string): Promise<string> {
+        try {
+            let file = this.app.vault.getAbstractFileByPath(filePath);
+            
+            if (!file || !(file instanceof TFile)) {
+                // Try to find by name
+                const files = this.app.vault.getMarkdownFiles();
+                const found = files.find(f => 
+                    f.basename === filePath || 
+                    f.basename === filePath.replace('.md', '') ||
+                    f.path === filePath
+                );
+                
+                if (!found) {
+                    return `Error: File '${filePath}' not found. Available files: ${files.slice(0, 10).map(f => f.basename).join(', ')}...`;
+                }
+                
+                file = found;
+            }
+            
+            const content = await this.app.vault.cachedRead(file as TFile);
+            return `File: ${file.path}\n\n${content}`;
+        } catch (error) {
+            return `Error reading file: ${error.message}`;
+        }
+    }
+
+    async toolListFiles(folderPath?: string, includeFolders: boolean = true): Promise<string> {
+        try {
+            const files = this.app.vault.getMarkdownFiles();
+            let result = '📁 Files in vault:\n\n';
+            
+            if (folderPath) {
+                const filtered = files.filter(f => f.path.startsWith(folderPath));
+                
+                if (filtered.length === 0) {
+                    return `No files found in folder '${folderPath}'. Check folder name or try without folder path.`;
+                }
+                
+                filtered.forEach(file => {
+                    result += `- ${file.path}\n`;
+                });
+                
+                return result + `\nTotal: ${filtered.length} files`;
+            } else {
+                // Group by folder
+                const folderMap = new Map<string, TFile[]>();
+                
+                files.forEach(file => {
+                    const folder = file.parent?.path || 'root';
+                    if (!folderMap.has(folder)) {
+                        folderMap.set(folder, []);
+                    }
+                    folderMap.get(folder)!.push(file);
+                });
+                
+                folderMap.forEach((files, folder) => {
+                    if (includeFolders) {
+                        result += `\n📂 ${folder}/\n`;
+                    }
+                    files.forEach(file => {
+                        result += `  - ${file.basename}\n`;
+                    });
+                });
+                
+                return result + `\n\nTotal: ${files.length} files in ${folderMap.size} folders`;
+            }
+        } catch (error) {
+            return `Error listing files: ${error.message}`;
+        }
+    }
+
+    async toolEditFile(filePath: string, content: string, mode: 'replace' | 'append' | 'prepend'): Promise<string> {
+        try {
+            let file = this.app.vault.getAbstractFileByPath(filePath);
+            
+            if (!file || !(file instanceof TFile)) {
+                // Try to find by name
+                const files = this.app.vault.getMarkdownFiles();
+                const found = files.find(f => 
+                    f.basename === filePath || 
+                    f.basename === filePath.replace('.md', '') ||
+                    f.path === filePath
+                );
+                
+                if (!found) {
+                    return `Error: File '${filePath}' not found. Use create_file to create a new file.`;
+                }
+                
+                file = found;
+            }
+            
+            let newContent: string;
+            
+            if (mode === 'replace') {
+                newContent = content;
+            } else {
+                const existingContent = await this.app.vault.cachedRead(file as TFile);
+                
+                if (mode === 'append') {
+                    newContent = existingContent + '\n\n' + content;
+                } else { // prepend
+                    newContent = content + '\n\n' + existingContent;
+                }
+            }
+            
+            await this.app.vault.modify(file as TFile, newContent);
+            
+            new Notice(`✅ Updated: ${(file as TFile).basename}`);
+            return `Successfully ${mode}d content to '${(file as TFile).path}'. New length: ${newContent.length} characters.`;
+        } catch (error) {
+            return `Error editing file: ${error.message}`;
+        }
+    }
+
+    async toolCreateFile(filePath: string, content: string): Promise<string> {
+        try {
+            // Ensure .md extension
+            if (!filePath.endsWith('.md')) {
+                filePath += '.md';
+            }
+            
+            // Check if file already exists
+            const existingFile = this.app.vault.getAbstractFileByPath(filePath);
+            if (existingFile) {
+                return `Error: File '${filePath}' already exists. Use edit_file to modify it.`;
+            }
+            
+            // Create parent folders if needed
+            const pathParts = filePath.split('/');
+            if (pathParts.length > 1) {
+                const folderPath = pathParts.slice(0, -1).join('/');
+                const folder = this.app.vault.getAbstractFileByPath(folderPath);
+                
+                if (!folder) {
+                    try {
+                        await this.app.vault.createFolder(folderPath);
+                    } catch (e) {
+                        // Folder might already exist, continue
+                    }
+                }
+            }
+            
+            await this.app.vault.create(filePath, content);
+            
+            new Notice(`✅ Created: ${pathParts[pathParts.length - 1]}`);
+            return `Successfully created file '${filePath}' with ${content.length} characters`;
+        } catch (error) {
+            return `Error creating file: ${error.message}`;
+        }
+    }
+
+    async toolCreateFolder(folderPath: string): Promise<string> {
+        try {
+            const existing = this.app.vault.getAbstractFileByPath(folderPath);
+            
+            if (existing) {
+                return `Folder '${folderPath}' already exists`;
+            }
+            
+            await this.app.vault.createFolder(folderPath);
+            
+            new Notice(`✅ Created folder: ${folderPath}`);
+            return `Successfully created folder '${folderPath}'`;
+        } catch (error) {
+            // Check if error is because folder already exists
+            if (error.message.includes('already exists')) {
+                return `Folder '${folderPath}' already exists`;
+            }
+            return `Error creating folder: ${error.message}`;
+        }
     }
 
     async searchVault(query: string): Promise<SearchResult[]> {
@@ -543,10 +1038,7 @@ export default class ChatPlugin extends Plugin {
             }
         }
 
-        // Sort by relevance score
         results.sort((a, b) => b.score - a.score);
-
-        // Return top N results
         return results.slice(0, this.settings.maxSearchResults);
     }
 
@@ -557,17 +1049,14 @@ export default class ChatPlugin extends Plugin {
 
         let score = 0;
 
-        // Title match (highest weight)
         if (titleLower.includes(queryLower)) {
             score += 10;
         }
 
-        // Exact phrase match
         if (contentLower.includes(queryLower)) {
             score += 5;
         }
 
-        // Individual word matches
         const queryWords = queryLower.split(/\s+/).filter(w => w.length > 2);
         queryWords.forEach(word => {
             const wordCount = (contentLower.match(new RegExp(word, 'g')) || []).length;
@@ -588,7 +1077,7 @@ export default class ChatPlugin extends Plugin {
             }
         });
 
-        return matches.slice(0, 3); // Return top 3 matching lines
+        return matches.slice(0, 3);
     }
 
     async processAIQueryInNote(editor: Editor, view: MarkdownView) {
@@ -600,7 +1089,6 @@ export default class ChatPlugin extends Plugin {
         const cursor = editor.getCursor();
         const content = editor.getValue();
         
-        // Find ai-chat code blocks
         const pattern = /```ai-chat\n([\s\S]*?)\n```/g;
         let match;
         let foundBlock = false;
@@ -610,18 +1098,15 @@ export default class ChatPlugin extends Plugin {
             const blockEnd = blockStart + match[0].length;
             const query = match[1].trim();
             
-            // Check if cursor is in this block
             const cursorPos = editor.posToOffset(cursor);
             if (cursorPos >= blockStart && cursorPos <= blockEnd) {
                 foundBlock = true;
                 
-                // Check if answer already exists
                 const afterBlock = content.substring(blockEnd);
                 const answerPattern = /\n\n```ai-answer\n([\s\S]*?)\n```/;
                 const answerMatch = afterBlock.match(answerPattern);
                 
                 if (answerMatch && afterBlock.indexOf(answerMatch[0]) === 0) {
-                    // Update existing answer
                     new Notice('กำลังอัพเดตคำตอบ...');
                     const answer = await this.callOpenRouter(query);
                     const newAnswer = `\n\n\`\`\`ai-answer\n${answer}\n\`\`\``;
@@ -633,7 +1118,6 @@ export default class ChatPlugin extends Plugin {
                         editor.offsetToPos(replaceEnd)
                     );
                 } else {
-                    // Add new answer
                     new Notice('กำลังถาม AI...');
                     const answer = await this.callOpenRouter(query);
                     const answerBlock = `\n\n\`\`\`ai-answer\n${answer}\n\`\`\``;
@@ -650,7 +1134,6 @@ export default class ChatPlugin extends Plugin {
         }
 
         if (!foundBlock) {
-            // Create new query block at cursor
             const selectedText = editor.getSelection();
             const query = selectedText || 'คำถามของคุณที่นี่';
             const newBlock = `\`\`\`ai-chat\n${query}\n\`\`\`\n\n`;
@@ -665,14 +1148,13 @@ export default class ChatPlugin extends Plugin {
         }
     }
 
-    async renderAIChatBlock(source: string, el: HTMLElement, ctx: any) {
+    async renderAIChatBlock(source: string, el: HTMLElement) {
         const container = el.createDiv({ cls: 'ai-chat-block' });
         
         const queryDiv = container.createDiv({ cls: 'ai-chat-query' });
         queryDiv.createEl('strong', { text: '❓ คำถาม: ' });
         queryDiv.createEl('span', { text: source });
 
-        // Add custom styles for the block
         if (!document.querySelector('#ai-chat-styles')) {
             const style = document.createElement('style');
             style.id = 'ai-chat-styles';
@@ -687,18 +1169,6 @@ export default class ChatPlugin extends Plugin {
                 .ai-chat-query {
                     color: var(--text-normal);
                     font-size: 0.95em;
-                }
-                .ai-answer-block {
-                    border: 2px solid var(--color-green);
-                    border-radius: 8px;
-                    padding: 12px;
-                    margin: 10px 0;
-                    background-color: var(--background-secondary);
-                }
-                .ai-answer-content {
-                    color: var(--text-normal);
-                    margin-top: 8px;
-                    line-height: 1.6;
                 }
             `;
             document.head.appendChild(style);
@@ -741,7 +1211,9 @@ export default class ChatPlugin extends Plugin {
             leaf = leaves[0];
         } else {
             leaf = workspace.getRightLeaf(false);
-            await leaf?.setViewState({ type: VIEW_TYPE_CHAT, active: true });
+            if (leaf) {
+                await leaf.setViewState({ type: VIEW_TYPE_CHAT, active: true });
+            }
         }
 
         if (leaf) {
@@ -758,24 +1230,6 @@ export default class ChatPlugin extends Plugin {
     }
 }
 
-class SearchModal {
-    app: App;
-    onSubmit: (query: string) => void;
-
-    constructor(app: App, onSubmit: (query: string) => void) {
-        this.app = app;
-        this.onSubmit = onSubmit;
-    }
-
-    open() {
-        // Simple implementation - in real plugin, use Modal class
-        const query = prompt('ค้นหาอะไรใน notes?');
-        if (query) {
-            this.onSubmit(query);
-        }
-    }
-}
-
 class ChatSettingTab extends PluginSettingTab {
     plugin: ChatPlugin;
 
@@ -788,7 +1242,7 @@ class ChatSettingTab extends PluginSettingTab {
         const { containerEl } = this;
         containerEl.empty();
 
-        containerEl.createEl('h2', { text: 'Chat Plugin Settings' });
+        containerEl.createEl('h2', { text: 'AI Chat Plugin Settings' });
 
         new Setting(containerEl)
             .setName('OpenRouter API Key')
@@ -817,7 +1271,17 @@ class ChatSettingTab extends PluginSettingTab {
             cls: 'setting-item-description'
         });
 
-        containerEl.createEl('h3', { text: 'Search Agent Settings' });
+        containerEl.createEl('h3', { text: 'Agent Features' });
+
+        new Setting(containerEl)
+            .setName('Enable Function Calling')
+            .setDesc('เปิดใช้งาน AI Agent ที่สามารถสร้าง/แก้ไขไฟล์ได้ (ต้องใช้ model ที่รองรับ function calling)')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.enableFunctionCalling)
+                .onChange(async (value) => {
+                    this.plugin.settings.enableFunctionCalling = value;
+                    await this.plugin.saveSettings();
+                }));
 
         new Setting(containerEl)
             .setName('Enable Search Agent')
@@ -828,6 +1292,8 @@ class ChatSettingTab extends PluginSettingTab {
                     this.plugin.settings.enableSearchAgent = value;
                     await this.plugin.saveSettings();
                 }));
+
+        containerEl.createEl('h3', { text: 'Search Settings' });
 
         new Setting(containerEl)
             .setName('Search Mode')
@@ -857,9 +1323,19 @@ class ChatSettingTab extends PluginSettingTab {
         
         const instructions = containerEl.createEl('div', { cls: 'setting-item-description' });
         instructions.innerHTML = `
+            <h4>🤖 Agent Mode (Function Calling):</h4>
+            <p><strong>เปิด Agent Toggle ใน Chat View</strong> แล้ว AI จะสามารถ:</p>
+            <ul>
+                <li>📖 <strong>อ่านไฟล์:</strong> "อ่านไฟล์ Project Ideas ให้หน่อย"</li>
+                <li>📝 <strong>สร้างไฟล์:</strong> "สร้างไฟล์ Meeting Notes สำหรับวันนี้"</li>
+                <li>✏️ <strong>แก้ไขไฟล์:</strong> "เพิ่ม task ใหม่ในไฟล์ TODO"</li>
+                <li>📁 <strong>จัดการโฟลเดอร์:</strong> "สร้างโฟลเดอร์สำหรับ project ใหม่"</li>
+                <li>🔍 <strong>แสดงรายการ:</strong> "มีไฟล์อะไรบ้างในโฟลเดอร์ Projects"</li>
+            </ul>
+
             <h4>🔍 Search Agent Mode:</h4>
             <ol>
-                <li>เปิด Chat View และเปิด toggle "🔍 Search Notes"</li>
+                <li>เปิด Chat View และเปิด toggle "🔍 Search"</li>
                 <li>ถามคำถามเกี่ยวกับเนื้อหาใน notes เช่น:
                     <ul>
                         <li>"สรุปสิ่งที่ผมเขียนเกี่ยวกับ machine learning"</li>
@@ -872,24 +1348,20 @@ class ChatSettingTab extends PluginSettingTab {
 
             <h4>💬 วิธีใช้ AI ใน Note:</h4>
             <p><strong>1. สร้างคำถาม:</strong></p>
-            <pre>
-\`\`\`ai-chat
+            <pre>\`\`\`ai-chat
 คำถามของคุณที่นี่
-\`\`\`
-            </pre>
-            <p><strong>2. วางเคอร์เซอร์ใน code block</strong> แล้วใช้คำสั่ง "Ask AI in Note" (Ctrl/Cmd + P)</p>
+\`\`\`</pre>
+            <p><strong>2. วางเคอร์เซอร์ใน block</strong> แล้วใช้คำสั่ง "Ask AI in Note" (Ctrl/Cmd + P)</p>
             <p><strong>3. คำตอบจะปรากฏใต้คำถาม:</strong></p>
-            <pre>
-\`\`\`ai-answer
+            <pre>\`\`\`ai-answer
 คำตอบจาก AI
-\`\`\`
-            </pre>
-            <p>💡 <strong>เคล็ดลับ:</strong> เลือกข้อความแล้วใช้คำสั่ง "Ask AI in Note" เพื่อสร้าง query block ทันที</p>
-            
-            <h4>⚙️ Search Modes:</h4>
+\`\`\`</pre>
+
+            <h4>⚠️ หมายเหตุสำคัญ:</h4>
             <ul>
-                <li><strong>Full-text Search:</strong> ค้นหาแบบ keyword ง่ายและรวดเร็ว ไม่ต้องใช้ Vector DB</li>
-                <li><strong>Semantic Search:</strong> ค้นหาแบบเข้าใจความหมาย (ยังไม่พร้อมใช้งาน - อยู่ระหว่างพัฒนา)</li>
+                <li><strong>Function Calling</strong> ต้องใช้กับ models ที่รองรับ เช่น Claude 3.5 Sonnet, GPT-4</li>
+                <li>สามารถใช้ทั้ง Search และ Agent พร้อมกันได้</li>
+                <li>การใช้ Agent Mode จะใช้ tokens มากกว่าปกติ</li>
             </ul>
         `;
     }
