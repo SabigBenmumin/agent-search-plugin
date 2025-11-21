@@ -3,9 +3,9 @@
 	"name": "vault searcher",
 	"version": "1.0.0",
 	"minAppVersion": "0.15.0",
-	"description": "ให้ ai ช่วยค้นหาและสรุปข้อมูลใน vault ของคุณ",
+	"description": "use AI Agent for search some your note and manage your vault, ให้ ai ช่วยค้นหาและสรุปข้อมูลใน vault ของคุณ, support thai language",
 	"author": "Sabig",
-	"authorUrl": "https://obsidian.md",
-	"fundingUrl": "https://obsidian.md/pricing",
+	"authorUrl": "https://github.com/SabigBenmumin",
+	"fundingUrl": "https://github.com/SabigBenmumin/agent-search-plugin",
 	"isDesktopOnly": false
 }
