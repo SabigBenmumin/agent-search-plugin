@@ -1,4 +1,4 @@
-import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, Notice, MarkdownView, Editor, TFile } from 'obsidian';
+import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, Notice, MarkdownView, Editor, TFile, TFolder } from 'obsidian';
 
 interface ChatPluginSettings {
     openRouterKey: string;
@@ -139,6 +139,48 @@ const AVAILABLE_TOOLS = [
                     }
                 },
                 required: ["folder_path"]
+            }
+        }
+    },
+    {
+        type: "function",
+        function: {
+            name: "rename_file",
+            description: "เปลี่ยนชื่อไฟล์ในวอลท์",
+            parameters: {
+                type: "object",
+                properties: {
+                    old_path: {
+                        type: "string",
+                        description: "พาธปัจจุบันของไฟล์"
+                    },
+                    new_name: {
+                        type: "string",
+                        description: "ชื่อใหม่ของไฟล์ (ไม่รวม extension หากเป็น .md)"
+                    }
+                },
+                required: ["old_path", "new_name"]
+            }
+        }
+    },
+    {
+        type: "function",
+        function: {
+            name: "rename_folder",
+            description: "เปลี่ยนชื่อโฟลเดอร์ในวอลท์",
+            parameters: {
+                type: "object",
+                properties: {
+                    old_path: {
+                        type: "string",
+                        description: "พาธปัจจุบันของโฟลเดอร์"
+                    },
+                    new_name: {
+                        type: "string",
+                        description: "ชื่อใหม่ของโฟลเดอร์"
+                    }
+                },
+                required: ["old_path", "new_name"]
             }
         }
     }
@@ -654,6 +696,12 @@ Important guidelines:
                 case 'create_folder':
                     result = await this.plugin.toolCreateFolder(args.folder_path);
                     break;
+                case 'rename_file':
+                    result = await this.plugin.toolRenameFile(args.old_path, args.new_name);
+                    break;
+                case 'rename_folder':
+                    result = await this.plugin.toolRenameFolder(args.old_path, args.new_name);
+                    break;
                 default:
                     result = `Error: Unknown tool '${functionName}'`;
             }
@@ -1020,6 +1068,82 @@ export default class ChatPlugin extends Plugin {
         }
     }
 
+    async toolRenameFile(oldPath: string, newName: string): Promise<string> {
+        try {
+            let file = this.app.vault.getAbstractFileByPath(oldPath);
+            
+            if (!file || !(file instanceof TFile)) {
+                // Try to find by name
+                const files = this.app.vault.getMarkdownFiles();
+                const found = files.find(f => 
+                    f.basename === oldPath || 
+                    f.basename === oldPath.replace('.md', '') ||
+                    f.path === oldPath
+                );
+                
+                if (!found) {
+                    return `Error: File '${oldPath}' not found. Available files: ${files.slice(0, 10).map(f => f.basename).join(', ')}...`;
+                }
+                
+                file = found;
+            }
+            
+            // Ensure .md extension if not provided
+            let finalNewName = newName;
+            if (!finalNewName.endsWith('.md')) {
+                finalNewName += '.md';
+            }
+            
+            // Get the parent folder path
+            const parentPath = (file as TFile).parent?.path;
+            const newPath = parentPath ? `${parentPath}/${finalNewName}` : finalNewName;
+            
+            // Check if new name already exists
+            const existingFile = this.app.vault.getAbstractFileByPath(newPath);
+            if (existingFile) {
+                return `Error: File name '${finalNewName}' already exists in this folder`;
+            }
+            
+            await this.app.vault.rename(file as TFile, newPath);
+            
+            new Notice(`✅ Renamed: ${(file as TFile).basename} → ${finalNewName}`);
+            return `Successfully renamed '${(file as TFile).basename}' to '${finalNewName}'`;
+        } catch (error) {
+            return `Error renaming file: ${error.message}`;
+        }
+    }
+
+    async toolRenameFolder(oldPath: string, newName: string): Promise<string> {
+        try {
+            const folder = this.app.vault.getAbstractFileByPath(oldPath);
+            
+            if (!folder) {
+                return `Error: Folder '${oldPath}' not found`;
+            }
+            
+            if (!(folder instanceof TFolder)) {
+                return `Error: '${oldPath}' is not a folder`;
+            }
+            
+            // Get parent folder path
+            const parentPath = folder.parent?.path;
+            const newPath = parentPath ? `${parentPath}/${newName}` : newName;
+            
+            // Check if new name already exists
+            const existingFolder = this.app.vault.getAbstractFileByPath(newPath);
+            if (existingFolder) {
+                return `Error: Folder name '${newName}' already exists in this parent folder`;
+            }
+            
+            await this.app.vault.rename(folder as TFolder, newPath);
+            
+            new Notice(`✅ Renamed folder: ${folder.name} → ${newName}`);
+            return `Successfully renamed folder '${folder.name}' to '${newName}'`;
+        } catch (error) {
+            return `Error renaming folder: ${error.message}`;
+        }
+    }
+
     async searchVault(query: string): Promise<SearchResult[]> {
         const files = this.app.vault.getMarkdownFiles();
         const results: SearchResult[] = [];
@@ -1328,6 +1452,7 @@ class ChatSettingTab extends PluginSettingTab {
             <ul>
                 <li>📖 <strong>อ่านไฟล์:</strong> "อ่านไฟล์ Project Ideas ให้หน่อย"</li>
                 <li>📝 <strong>สร้างไฟล์:</strong> "สร้างไฟล์ Meeting Notes สำหรับวันนี้"</li>
+                <li>📝 <strong>แก้ชื่อไฟล์:</strong> "เปลี่ยนชื่อไฟล์ Meeting Notes สำหรับวันนี้โดยเพิ่มวันที่"</li>
                 <li>✏️ <strong>แก้ไขไฟล์:</strong> "เพิ่ม task ใหม่ในไฟล์ TODO"</li>
                 <li>📁 <strong>จัดการโฟลเดอร์:</strong> "สร้างโฟลเดอร์สำหรับ project ใหม่"</li>
                 <li>🔍 <strong>แสดงรายการ:</strong> "มีไฟล์อะไรบ้างในโฟลเดอร์ Projects"</li>
