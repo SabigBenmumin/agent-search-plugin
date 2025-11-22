@@ -1,4 +1,4 @@
-import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, Notice, MarkdownView, Editor, TFile, TFolder } from 'obsidian';
+import { App, Plugin, PluginSettingTab, Setting, ItemView, WorkspaceLeaf, Notice, MarkdownView, Editor, TFile, TFolder ,normalizePath} from 'obsidian';
 
 interface ChatPluginSettings {
     openRouterKey: string;
@@ -897,6 +897,7 @@ export default class ChatPlugin extends Plugin {
     // Tool implementations
     async toolReadNote(filePath: string): Promise<string> {
         try {
+            filePath = normalizePath(filePath)
             let file = this.app.vault.getAbstractFileByPath(filePath);
             
             if (!file || !(file instanceof TFile)) {
@@ -969,7 +970,7 @@ export default class ChatPlugin extends Plugin {
 
     async toolEditFile(filePath: string, content: string, mode: 'replace' | 'append' | 'prepend'): Promise<string> {
         try {
-            let file = this.app.vault.getAbstractFileByPath(filePath);
+            let file = this.app.vault.getAbstractFileByPath(normalizePath(filePath));
             
             if (!file || !(file instanceof TFile)) {
                 // Try to find by name
@@ -1012,6 +1013,8 @@ export default class ChatPlugin extends Plugin {
 
     async toolCreateFile(filePath: string, content: string): Promise<string> {
         try {
+
+            filePath = normalizePath(filePath);
             // Ensure .md extension
             if (!filePath.endsWith('.md')) {
                 filePath += '.md';
@@ -1026,7 +1029,7 @@ export default class ChatPlugin extends Plugin {
             // Create parent folders if needed
             const pathParts = filePath.split('/');
             if (pathParts.length > 1) {
-                const folderPath = pathParts.slice(0, -1).join('/');
+                const folderPath = normalizePath(pathParts.slice(0, -1).join('/'));
                 const folder = this.app.vault.getAbstractFileByPath(folderPath);
                 
                 if (!folder) {
@@ -1049,6 +1052,7 @@ export default class ChatPlugin extends Plugin {
 
     async toolCreateFolder(folderPath: string): Promise<string> {
         try {
+            folderPath = normalizePath(folderPath);
             const existing = this.app.vault.getAbstractFileByPath(folderPath);
             
             if (existing) {
@@ -1070,6 +1074,7 @@ export default class ChatPlugin extends Plugin {
 
     async toolRenameFile(oldPath: string, newName: string): Promise<string> {
         try {
+            oldPath = normalizePath(oldPath);
             let file = this.app.vault.getAbstractFileByPath(oldPath);
             
             if (!file || !(file instanceof TFile)) {
@@ -1115,6 +1120,8 @@ export default class ChatPlugin extends Plugin {
 
     async toolRenameFolder(oldPath: string, newName: string): Promise<string> {
         try {
+            oldPath = normalizePath(oldPath);
+
             const folder = this.app.vault.getAbstractFileByPath(oldPath);
             
             if (!folder) {
