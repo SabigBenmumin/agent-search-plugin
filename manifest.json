@@ -3,7 +3,7 @@
 	"name": "vault searcher",
 	"version": "1.0.0",
 	"minAppVersion": "0.15.0",
-	"description": "strong support Thai language a search assistant plugin that lets you run AI-powered queries inside Obsidian.",
+	"description": "Strong Thai language support. An AI-powered search assistant that lets you chat with your notes and automate vault operations.",
 	"author": "Sabig",
 	"authorUrl": "https://github.com/SabigBenmumin",
 	"fundingUrl": "https://github.com/SabigBenmumin/agent-search-plugin",
