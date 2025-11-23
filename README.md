@@ -217,24 +217,6 @@ View pricing: https://openrouter.ai/docs#pricing
 - **Obsidian** v0.15.0 or later
 - **Node.js** 16+ (for development)
 - **Internet connection** (for API calls)
-
-### Architecture
-
-```
-src/
-├── main.ts                 # Plugin lifecycle
-├── settings.ts             # Configuration interface
-├── chat-view.ts            # Chat UI component
-├── tools/                  # Function calling implementations
-│   ├── read-note.ts
-│   ├── edit-file.ts
-│   ├── create-file.ts
-│   └── ...
-└── utils/                  # Helpers
-    ├── search.ts           # Vault search
-    └── api.ts              # OpenRouter calls
-```
-
 ---
 
 ## 🛠️ Development
